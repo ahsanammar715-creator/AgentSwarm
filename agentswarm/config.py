@@ -58,6 +58,8 @@ class SwarmConfig:
     foreman: ModelConfig = field(default_factory=_default_foreman)
     lead: ModelConfig = field(default_factory=_default_worker)
     worker: ModelConfig = field(default_factory=_default_worker)
+    # Model that checks each task once, when it is finished. Defaults to the foreman.
+    reviewer: ModelConfig | None = None
     # Optional vision model used by design mode to critique screenshots.
     # Falls back to the foreman when unset (vision is rare and short, so it's cheap).
     vision: ModelConfig | None = None
@@ -65,6 +67,8 @@ class SwarmConfig:
     workers: int = 4
     max_steps_per_task: int = 40
     max_task_attempts: int = 2
+    per_task_review: bool = True  # the expensive model checks every finished task
+    max_task_reviews: int = 2  # how many times a task may be sent back before it counts as failed
     review_rounds: int = 2  # how many times the foreman may send a cleanup team back in
     use_worktree: bool = True
     budget_usd: float | None = None  # hard stop when total spend crosses this
@@ -74,7 +78,7 @@ class SwarmConfig:
 
 
 _MODEL_KEYS = {f.name for f in fields(ModelConfig)}
-_ROLES = ("foreman", "lead", "worker", "vision")
+_ROLES = ("foreman", "lead", "worker", "reviewer", "vision")
 
 
 def _apply_model(cfg: SwarmConfig, role: str, data: dict) -> None:

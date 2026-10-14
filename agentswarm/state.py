@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 TODO, IN_PROGRESS, DONE, FAILED, BLOCKED = "todo", "in_progress", "done", "failed", "blocked"
+REVIEW = "review"  # finished by a worker, waiting for the foreman's end-of-task check
 
 
 @dataclass
@@ -30,6 +31,8 @@ class Task:
     attempts: int = 0
     summary: str = ""
     error: str = ""
+    reviews: int = 0  # how many times the foreman sent this task back
+    review_note: str = ""
 
 
 @dataclass
@@ -71,6 +74,9 @@ class RunState:
         self.findings: list[Finding] = [Finding(**f) for f in data.get("findings", [])]
         self.events: list[dict] = data.get("events", [])
         self.ui_evidence: dict = data.get("ui_evidence", {})
+        # Per task: file contents before the task first touched them, so the foreman reviews
+        # only that task's changes. In memory only; after a resume the baseline restarts.
+        self.baselines: dict[str, dict] = {}
 
     # ---------- persistence ----------
     @classmethod
@@ -187,9 +193,39 @@ class RunState:
                 task.status, task.error = FAILED, error
             self.save()
 
+    def submit_for_review(self, task_id: str, summary: str) -> None:
+        with self._lock:
+            task = self.get_task(task_id)
+            if task is not None:
+                task.status, task.summary, task.error = REVIEW, summary, ""
+                self.save()
+
+    def apply_verdict(self, task_id: str, approved: bool, feedback: str, max_reviews: int) -> str:
+        """Foreman's end-of-task verdict. Returns the task's new status."""
+        with self._lock:
+            task = self.get_task(task_id)
+            if task is None:
+                raise KeyError(f"no task {task_id}")
+            task.review_note = feedback
+            if approved:
+                task.status = DONE
+            elif task.reviews < max_reviews:
+                task.reviews += 1
+                task.status, task.assignee = TODO, None
+                task.error = f"FOREMAN SENT THIS BACK (review {task.reviews}/{max_reviews}): {feedback}"
+            else:
+                task.status = FAILED
+                task.error = f"rejected {task.reviews + 1} times by the foreman: {feedback}"
+            self.save()
+            return task.status
+
+    def awaiting_review(self) -> list[Task]:
+        with self._lock:
+            return [t for t in self.tasks if t.status == REVIEW]
+
     def pending(self) -> bool:
         with self._lock:
-            return any(t.status in (TODO, IN_PROGRESS) for t in self.tasks)
+            return any(t.status in (TODO, IN_PROGRESS, REVIEW) for t in self.tasks)
 
     def reset_in_progress(self) -> int:
         """Used on resume: anything that was mid-flight goes back to the board."""

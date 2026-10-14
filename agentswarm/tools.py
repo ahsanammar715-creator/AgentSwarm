@@ -82,6 +82,7 @@ class Toolbox:
         self.vision = vision
         self.root = Path(state.workdir).resolve()
         self.design = state.design and task.ui
+        self.runs: list[dict] = []  # commands run during this attempt, for the end-of-task review
 
     def schemas(self) -> list:
         return BASE_TOOLS + (DESIGN_TOOLS if self.design else [])
@@ -117,6 +118,16 @@ class Toolbox:
         if ".git" in p.relative_to(self.root).parts:
             raise ValueError("the .git directory is off limits")
         return p
+
+    def _remember(self, p: Path) -> None:
+        """Record a file's content before this task first changes it."""
+        rel = str(p.relative_to(self.root))
+        base = self.state.baselines.setdefault(self.task.id, {})
+        if rel not in base:
+            base[rel] = p.read_text(errors="replace") if p.is_file() else None
+
+    def evidence(self) -> dict:
+        return {"baseline": dict(self.state.baselines.get(self.task.id, {})), "runs": list(self.runs)}
 
     def _touched(self) -> None:
         ev = self.state.ui_evidence.setdefault(self.task.id, {"edits": 0, "shots": {}})
@@ -178,6 +189,7 @@ class Toolbox:
 
     def t_write_file(self, path: str, content: str) -> str:
         p = self._path(path)
+        self._remember(p)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
         self._touched()
@@ -191,6 +203,7 @@ class Toolbox:
             return "error: old snippet not found (read the file again; whitespace must match)"
         if count > 1 and not replace_all:
             return f"error: old snippet matches {count} times; add context or set replace_all"
+        self._remember(p)
         p.write_text(text.replace(old, new) if replace_all else text.replace(old, new, 1))
         self._touched()
         return f"edited {path} ({count if replace_all else 1} replacement)"
@@ -212,6 +225,7 @@ class Toolbox:
         except subprocess.TimeoutExpired:
             return f"error: timed out after {limit}s"
         out = (proc.stdout + ("\n[stderr]\n" + proc.stderr if proc.stderr.strip() else "")).strip()
+        self.runs.append({"command": command, "exit": proc.returncode, "tail": out[-1500:]})
         if len(out) > MAX_OUTPUT:  # keep the tail: that's where test failures are
             out = f"... [{len(out) - MAX_OUTPUT} chars cut]\n" + out[-MAX_OUTPUT:]
         return f"exit={proc.returncode}\n{out}"

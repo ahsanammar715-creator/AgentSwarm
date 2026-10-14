@@ -16,7 +16,8 @@ def _findings_text(state: RunState, limit: int = 30) -> str:
 
 
 def run_task(state: RunState, name: str, task: Task, llm: LLM, cfg, vision: LLM | None = None,
-             stop: threading.Event | None = None) -> tuple[bool, str]:
+             stop: threading.Event | None = None) -> tuple[bool, str, dict]:
+    """Returns (ok, summary-or-reason, evidence for the end-of-task review)."""
     tools = Toolbox(state, name, task, cfg, vision)
     system = prompts.WORKER.format(
         name=name,
@@ -29,7 +30,13 @@ def run_task(state: RunState, name: str, task: Task, llm: LLM, cfg, vision: LLM 
         findings=_findings_text(state),
         design=prompts.DESIGN_RULES.format(n=cfg.design_min_iterations) if tools.design else "",
     )
-    prior = f"\nA previous attempt failed: {task.error}\nAvoid repeating that." if task.error else ""
+    if task.error.startswith("FOREMAN SENT THIS BACK"):
+        prior = ("\nThe foreman reviewed the finished work and sent it back. Your earlier changes are still on disk."
+                 f"\n{task.error}\nFix every point, re-verify, then complete_task.")
+    elif task.error:
+        prior = f"\nA previous attempt failed: {task.error}\nAvoid repeating that."
+    else:
+        prior = ""
     messages: list = [
         {"role": "system", "content": system},
         {"role": "user", "content": "Start your task now." + prior},
@@ -37,7 +44,7 @@ def run_task(state: RunState, name: str, task: Task, llm: LLM, cfg, vision: LLM 
     nudged = False
     for step in range(cfg.max_steps_per_task):
         if stop is not None and stop.is_set():
-            return False, "stopped by foreman"
+            return False, "stopped by foreman", tools.evidence()
         if step and step % 8 == 0:
             mail = state.inbox(name)
             if mail:
@@ -47,7 +54,7 @@ def run_task(state: RunState, name: str, task: Task, llm: LLM, cfg, vision: LLM 
         calls = msg.get("tool_calls") or []
         if not calls:
             if nudged:
-                return False, "worker stopped calling tools without complete_task: " + (msg.get("content") or "")[:300]
+                return False, "worker stopped calling tools without complete_task: " + (msg.get("content") or "")[:300], tools.evidence()
             nudged = True
             messages.append({"role": "user", "content": "Keep working with tools. When finished call complete_task (or fail_task)."})
             continue
@@ -56,15 +63,17 @@ def run_task(state: RunState, name: str, task: Task, llm: LLM, cfg, vision: LLM 
             try:
                 result = tools.call(fn.get("name", ""), fn.get("arguments", "{}"))
             except TaskFinished as fin:
-                return fin.ok, fin.text
+                return fin.ok, fin.text, tools.evidence()
             messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": result})
         if step == cfg.max_steps_per_task - 3:
             messages.append({"role": "user", "content": "You have 2 steps left. Wrap up: verify and call complete_task or fail_task."})
-    return False, f"ran out of steps ({cfg.max_steps_per_task})"
+    return False, f"ran out of steps ({cfg.max_steps_per_task})", tools.evidence()
 
 
 def worker_loop(state: RunState, name: str, llm: LLM, cfg, vision: LLM | None, stop: threading.Event,
-                on_task_end=None) -> None:
+                on_task_end=None, review_fn=None) -> None:
+    """review_fn(task, summary, evidence) -> (approved, feedback), or None to queue the task
+    for a host-side review (MCP mode). Without review_fn, finished tasks are done at once."""
     while not stop.is_set():
         task = state.claim_next(name)
         if task is None:
@@ -74,14 +83,34 @@ def worker_loop(state: RunState, name: str, llm: LLM, cfg, vision: LLM | None, s
             continue
         state.log(name, f"claimed {task.id}: {task.title}")
         try:
-            ok, text = run_task(state, name, task, llm, cfg, vision, stop)
+            ok, text, evidence = run_task(state, name, task, llm, cfg, vision, stop)
         except BudgetExceeded as e:
             state.finish_task(task.id, False, error=str(e), retry_limit=0)
             state.log(name, str(e))
             stop.set()
             return
         except Exception as e:  # network errors etc: give the task back
-            ok, text = False, f"crashed: {e}"
+            ok, text, evidence = False, f"crashed: {e}", {}
+        if ok and review_fn is not None:
+            state.submit_for_review(task.id, text)
+            try:
+                verdict = review_fn(task, text, evidence)
+            except BudgetExceeded as e:
+                state.log(name, str(e))
+                stop.set()
+                return
+            except Exception as e:  # never strand a task in review because the reviewer call broke
+                verdict = (True, f"review unavailable ({e}); accepted unreviewed")
+                state.add_finding("swarm", f"WARNING: {task.id} was accepted without a foreman review: {e}", task.id)
+            if verdict is None:
+                state.log(name, f"finished {task.id}; waiting for the foreman's review")
+                continue
+            approved, feedback = verdict
+            status = state.apply_verdict(task.id, approved, feedback, cfg.max_task_reviews)
+            state.log("foreman", f"review {task.id}: {'approved' if approved else 'sent back'} -- {feedback[:200]}")
+            if on_task_end:
+                on_task_end(task, status == "done")
+            continue
         state.finish_task(task.id, ok, summary=text if ok else "", error="" if ok else text,
                           retry_limit=cfg.max_task_attempts)
         state.log(name, f"{'done' if ok else 'failed'} {task.id}: {text[:200]}")

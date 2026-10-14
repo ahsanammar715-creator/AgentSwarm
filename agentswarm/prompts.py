@@ -67,8 +67,19 @@ Return ONE JSON object:
   "abort": false
 }"""
 
+FOREMAN_TASK_REVIEW = """You are the FOREMAN checking ONE task a cheap worker says it has finished.
+You see the task, the worker's summary, exactly what it changed (before -> after), and the commands it ran.
+Judge only this task. Approve when it does what the task asked, is verified, and has no real defects.
+Send it back when something is wrong or unproven: a bug, a missed requirement, an untested claim,
+leftover debug code, a hack, or changes outside the task's scope. Don't send back for taste or nits.
+
+Return ONE JSON object:
+{"verdict": "approve" or "redo", "feedback": "if redo: numbered, concrete fixes the worker can act on; if approve: one line"}"""
+
 FOREMAN_AUDIT = """You are the FOREMAN doing the audit. The team says it is done. Trust nothing.
-You get the plan, acceptance criteria, the team report, and the diff of EVERY changed file.
+You get the plan, acceptance criteria, the team report (each task already passed your end-of-task
+review), and the diff of every changed file that no task review covered.
+Look at how the pieces fit together.
 Check each file for: bugs, missed requirements, broken edge cases, dead code, leftover debug output,
 security problems, tests that don't test anything, scope creep, inconsistencies between files.
 

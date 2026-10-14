@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -61,8 +62,30 @@ TOOLS = [
     },
     {
         "name": "swarm_status",
-        "description": "Compressed status: board, one line per task, recent findings, mail for the foreman, cost line.",
-        "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "repo": {"type": "string"}}},
+        "description": (
+            "Compressed status: board, one line per task, recent findings, mail for the foreman, cost line. "
+            "Pass wait_ms (e.g. 600000) to block until the swarm needs you -- a finished task to review, "
+            "a failure, mail for you, or the run stopping -- instead of polling. 'wake' says why it returned."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "run_id": {"type": "string"}, "repo": {"type": "string"}, "wait_ms": {"type": "integer"}}},
+    },
+    {
+        "name": "swarm_task_review",
+        "description": (
+            "The end-of-task check. Returns ONE finished task: its description, the worker's summary, exactly what it "
+            "changed, and the commands it ran. Then call swarm_verdict. Omit task_id for the next task waiting."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "run_id": {"type": "string"}, "task_id": {"type": "string"}, "repo": {"type": "string"}}},
+    },
+    {
+        "name": "swarm_verdict",
+        "description": "Approve a finished task, or send it back with numbered, concrete fixes.",
+        "inputSchema": {"type": "object", "properties": {
+            "run_id": {"type": "string"}, "task_id": {"type": "string"}, "approve": {"type": "boolean"},
+            "feedback": {"type": "string"}, "repo": {"type": "string"}},
+            "required": ["task_id", "approve"]},
     },
     {
         "name": "swarm_message",
@@ -156,15 +179,72 @@ class Server:
         s = swarm.state
         return f"run_id={s.run_id}\nworkdir={s.workdir}\nbranch={s.branch}\nThe team is working. Check swarm_status in a few minutes."
 
+    def _wake_reason(self, sw: Swarm) -> str | None:
+        s = sw.state
+        if s.awaiting_review():
+            return "task-review"
+        if any(m.to == "foreman" and "foreman" not in m.read_by for m in s.mail):
+            return "mail"
+        if any(t.status == "failed" for t in s.tasks) and s.phase == "execute" and not self._running(s.run_id):
+            return "failure"
+        if s.phase in ("awaiting_review", "done"):
+            return s.phase
+        if not self._running(s.run_id):
+            return "stopped"
+        return None
+
     def swarm_status(self, args: dict) -> str:
         sw = self._swarm(args)
+        deadline = time.time() + min(int(args.get("wait_ms") or 0), 900_000) / 1000
+        failed_before = sum(1 for t in sw.state.tasks if t.status == "failed")
+        wake = self._wake_reason(sw)
+        while wake is None and time.time() < deadline:
+            time.sleep(2)
+            if sum(1 for t in sw.state.tasks if t.status == "failed") > failed_before:
+                wake = "failure"
+                break
+            wake = self._wake_reason(sw)
         running = "running" if self._running(sw.state.run_id) else "not running (use swarm_resume if unfinished)"
-        out = sw.status() + f"\nprocess: {running}"
+        out = f"wake: {wake or 'timeout'}\n" + sw.status() + f"\nprocess: {running}"
+        waiting = [t.id for t in sw.state.awaiting_review()]
+        if waiting:
+            out += f"\nwaiting for your review: {', '.join(waiting)} -> call swarm_task_review"
         for m in sw.state.mail:
             if m.to == "foreman" and "foreman" not in m.read_by:
                 m.read_by.append("foreman")
         sw.state.save()
         return out
+
+    def swarm_task_review(self, args: dict) -> str:
+        sw = self._swarm(args)
+        waiting = sw.state.awaiting_review()
+        task_id = args.get("task_id") or (waiting[0].id if waiting else None)
+        if not task_id:
+            return "no finished tasks are waiting for review"
+        p = sw.state.run_dir / "reviews" / f"{task_id}.md"
+        if not p.is_file():
+            return f"no review packet for {task_id}"
+        more = len(waiting) - 1 if waiting else 0
+        return p.read_text() + (f"\n\n({more} more task(s) waiting after this one)" if more > 0 else "")
+
+    def swarm_verdict(self, args: dict) -> str:
+        sw = self._swarm(args)
+        task = sw.state.get_task(args["task_id"])
+        if task is None or task.status != "review":
+            return f"error: task {args['task_id']} is not waiting for review"
+        approve = bool(args["approve"])
+        feedback = args.get("feedback", "")
+        if not approve and not feedback.strip():
+            return "error: when sending a task back, say exactly what to fix"
+        status = sw.state.apply_verdict(task.id, approve, feedback, sw.cfg.max_task_reviews)
+        if approve:
+            sw.reviewed_files.update(sw.state.baselines.get(task.id, {}).keys())
+        sw.state.log("foreman", f"review {task.id}: {'approved' if approve else 'sent back'} -- {feedback[:200]}")
+        if not self._running(sw.state.run_id) and sw.state.pending():
+            sw.state.phase = "execute"
+            sw.state.save()
+            self._launch(sw)
+        return f"{task.id} -> {status}"
 
     def swarm_message(self, args: dict) -> str:
         sw = self._swarm(args)

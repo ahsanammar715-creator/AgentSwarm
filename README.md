@@ -25,6 +25,11 @@ for design mode.
 - **Team plumbing.** Workers share a task board, a mailbox (to each other, to `all`, or to the
   foreman), and a findings ledger. They record what they learn there, such as the test command or a
   convention, so nobody has to rediscover it.
+- **End-of-task review.** When a worker finishes a task, the expensive model checks it once: that task's own
+  changes (before -> after) and the commands it ran, in a fresh small context so every review costs the
+  same. It approves or sends the task back with numbered fixes (up to `max_task_reviews` times). In
+  Codex the host reviews via `swarm_task_review` + `swarm_verdict`; `swarm_status(wait_ms=...)` blocks
+  until a task is ready instead of polling.
 - **Compressed supervision.** The foreman only ever sees a short summary: one line per task, recent
   findings, mail addressed to it, and the cost line. It steps in when a task fails for good.
 - **Audit and cleanup rounds.** The foreman audits the diff of every changed file and sends a cleanup
@@ -95,7 +100,7 @@ foreman workflow.
 **Claude Code:** this repo is a plugin. It ships `.claude-plugin/plugin.json`, `.mcp.json` and the
 `swarm` skill. Alternatively, run `claude mcp add agentswarm -- python3 -m agentswarm mcp`.
 
-MCP tools: `swarm_start`, `swarm_status`, `swarm_message`, `swarm_review`, `swarm_send_back`,
+MCP tools: `swarm_start`, `swarm_status`, `swarm_task_review`, `swarm_verdict`, `swarm_message`, `swarm_review`, `swarm_send_back`,
 `swarm_finish`, `swarm_resume`, `swarm_stop`.
 
 ## Configuration

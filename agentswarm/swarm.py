@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import threading
 from pathlib import Path
@@ -40,6 +41,9 @@ class Swarm:
         self.foreman = None if self.host_foreman else LLM(cfg.foreman, "foreman", self.ledger)
         self.lead = LLM(cfg.lead, "lead", self.ledger)
         self.worker_llm = LLM(cfg.worker, "worker", self.ledger)
+        rcfg = cfg.reviewer or (None if self.host_foreman else cfg.foreman)
+        self.reviewer = LLM(rcfg, "reviewer", self.ledger) if rcfg and rcfg.api_key else None
+        self.reviewed_files: set[str] = set()
         vcfg = cfg.vision or cfg.foreman
         self.vision = LLM(vcfg, "vision", self.ledger) if vcfg and vcfg.api_key else None
         self.stop = threading.Event()
@@ -139,7 +143,8 @@ class Swarm:
             threading.Thread(
                 target=worker_loop,
                 args=(self.state, f"worker-{i + 1}", self.worker_llm, self.cfg, self.vision, self.stop),
-                kwargs={"on_task_end": self._on_task_end},
+                kwargs={"on_task_end": self._on_task_end,
+                        "review_fn": self.review_task if self.cfg.per_task_review else None},
                 daemon=True,
             )
             for i in range(n)
@@ -166,6 +171,51 @@ class Swarm:
             self._interventions += 1
             self.intervene()
 
+    # ---------- end-of-task review ----------
+    def task_evidence(self, task, summary: str, evidence: dict, limit: int = 20000) -> str:
+        """What the foreman sees for one finished task: its own changes and test runs, nothing else."""
+        wd = Path(self.state.workdir)
+        diffs, used = [], 0
+        for rel, before in (evidence.get("baseline") or {}).items():
+            p = wd / rel
+            after = p.read_text(errors="replace") if p.is_file() else None
+            if before == after:
+                continue
+            d = "".join(difflib.unified_diff(
+                (before or "").splitlines(True), (after or "").splitlines(True),
+                fromfile=f"a/{rel}" if before is not None else "/dev/null",
+                tofile=f"b/{rel}" if after is not None else "/dev/null",
+            ))
+            if used + len(d) > limit:
+                d = d[: max(limit - used, 500)] + "\n... [diff truncated]"
+            used += len(d)
+            diffs.append(d)
+        runs = evidence.get("runs") or []
+        runs_text = "\n\n".join(f"$ {r['command']}  (exit {r['exit']})\n{r['tail'][-800:]}" for r in runs[-5:])
+        return (
+            f"TASK [{task.id}] {task.title}\n{task.description}\n\n"
+            f"WORKER SUMMARY:\n{summary}\n\n"
+            f"CHANGES:\n" + ("\n".join(diffs) or "(no file changes recorded)") + "\n\n"
+            f"COMMANDS RUN (last {min(len(runs), 5)} of {len(runs)}):\n" + (runs_text or "(none -- nothing was verified)")
+        )
+
+    def review_task(self, task, summary: str, evidence: dict):
+        """Called once per finished task. Fresh, small context every time: cost stays flat."""
+        text = self.task_evidence(task, summary, evidence)
+        if self.reviewer is None:
+            # Host mode (MCP): the host model reviews via swarm_task_review / swarm_verdict.
+            reviews = self.state.run_dir / "reviews"
+            reviews.mkdir(exist_ok=True)
+            (reviews / f"{task.id}.md").write_text(text)
+            return None
+        plan = self.state.plan[:3000]
+        out = self.reviewer.ask_json(prompts.FOREMAN_TASK_REVIEW, f"GOAL:\n{self.state.goal}\n\nPLAN (excerpt):\n{plan}\n\n{text}")
+        approved = str(out.get("verdict", "")).lower().startswith("approve")
+        if approved:
+            self.reviewed_files.update((evidence.get("baseline") or {}).keys())
+        self.print(f"  {'✓' if approved else '↺'} review {task.id}: {str(out.get('feedback', ''))[:120]}")
+        return approved, str(out.get("feedback", ""))
+
     def intervene(self) -> None:
         """Foreman steps in with only the compressed summary."""
         out = self.foreman.ask_json(prompts.FOREMAN_INTERVENE, f"GOAL:\n{self.state.goal}\n\n{self.status()}")
@@ -188,6 +238,8 @@ class Swarm:
     def audit_bundle(self, per_file: int = 6000, total: int = 120000) -> str:
         wd = Path(self.state.workdir)
         files = workspace.changed_files(wd, self.state.base_ref)
+        covered = [f for f in files if f in self.reviewed_files]
+        files = [f for f in files if f not in self.reviewed_files]
         parts, used = [], 0
         for f in files:
             d = workspace.file_diff(wd, self.state.base_ref, f, limit=per_file)
@@ -196,11 +248,14 @@ class Swarm:
                 continue
             used += len(d)
             parts.append(f"### {f}\n```diff\n{d}\n```")
-        return f"CHANGED FILES ({len(files)}):\n" + "\n\n".join(parts)
+        head = f"ALREADY CHECKED IN TASK REVIEWS ({len(covered)}): " + (", ".join(covered) or "none")
+        return head + f"\n\nNOT COVERED BY A TASK REVIEW ({len(files)}):\n" + "\n\n".join(parts)
 
     def team_report(self) -> str:
         return "\n".join(
-            f"- [{t.status}] {t.id} {t.title}: {(t.summary or t.error)[:600]}" for t in self.state.tasks
+            f"- [{t.status}] {t.id} {t.title}: {(t.summary or t.error)[:600]}"
+            + (f" | foreman review: {t.review_note[:200]}" if t.review_note else "")
+            for t in self.state.tasks
         )
 
     def phase_audit(self) -> None:

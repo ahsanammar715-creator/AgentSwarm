@@ -31,9 +31,19 @@ def _resp(content=None, tool_calls=None, usage=(1000, 200)):
     return {"choices": [{"message": msg}], "usage": {"prompt_tokens": usage[0], "completion_tokens": usage[1]}}
 
 
+REVIEWS = []
+
+
 def fake_post(self, body):
     msgs = body["messages"]
     system = msgs[0]["content"] if isinstance(msgs[0]["content"], str) else ""
+    if "checking ONE task" in system:
+        task_id = re.search(r"TASK \[(.+?)\]", msgs[-1]["content"]).group(1)
+        REVIEWS.append((task_id, msgs[-1]["content"]))
+        # send t1 back once, approve everything else
+        if task_id == "t1" and sum(1 for t, _ in REVIEWS if t == "t1") == 1:
+            return _resp(json.dumps({"verdict": "redo", "feedback": "1. add a test run"}))
+        return _resp(json.dumps({"verdict": "approve", "feedback": "ok"}))
     if "write the plan" in system:
         return _resp(json.dumps({"plan": "Add greet.py and test it.", "acceptance": ["greet() works"], "ui": False}))
     if "TEAM LEAD" in system:
@@ -96,6 +106,7 @@ class SwarmTest(unittest.TestCase):
     @mock.patch.dict(os.environ, ENV)
     @mock.patch.object(LLM, "_post", fake_post)
     def test_full_run_with_cleanup_round(self):
+        REVIEWS.clear()
         sw = Swarm.start(self.repo, "add a greet function", self.cfg, log=lambda *a: None)
         self.assertEqual(sw.run(), "done")
         s = sw.state
@@ -109,7 +120,15 @@ class SwarmTest(unittest.TestCase):
         self.assertIn("worker", sw.ledger.to_dict())
         self.assertGreater(sw.ledger.total, 0)
         self.assertTrue(s.findings)
-
+        # every finished task got exactly one end-of-task look, t1 twice (sent back once)
+        reviewed = [t for t, _ in REVIEWS]
+        self.assertEqual(reviewed.count("t1"), 2)
+        self.assertIn("t2", reviewed)
+        self.assertIn("fix-1", reviewed)
+        self.assertEqual(s.get_task("t1").reviews, 1)
+        t1_packet = next(p for t, p in REVIEWS if t == "t1")
+        self.assertIn("+def greet(n):", t1_packet)  # reviewer sees the task's own diff
+        self.assertIn("reviewer", sw.ledger.to_dict())
     @mock.patch.dict(os.environ, ENV)
     @mock.patch.object(LLM, "_post", fake_post)
     def test_resume_after_crash(self):
@@ -132,13 +151,31 @@ class SwarmTest(unittest.TestCase):
         srv = Server()
         out = srv.swarm_start({"repo": str(self.repo), "goal": "greet", "plan": "Add greet.py"})
         run_id = re.search(r"run_id=(\S+)", out).group(1)
+        r = {"repo": str(self.repo), "run_id": run_id}
+        seen = []
+        for _ in range(10):
+            status = srv.swarm_status({**r, "wait_ms": 20000})
+            if "wake: task-review" not in status:
+                break
+            packet = srv.swarm_task_review(r)
+            tid = re.search(r"TASK \[(.+?)\]", packet).group(1)
+            seen.append(tid)
+            if tid == "t1" and seen.count("t1") == 1:
+                self.assertIn("error", srv.swarm_verdict({**r, "task_id": tid, "approve": False}))
+                srv.swarm_verdict({**r, "task_id": tid, "approve": False, "feedback": "1. add a test"})
+            else:
+                srv.swarm_verdict({**r, "task_id": tid, "approve": True})
         srv.live[run_id][1].join(30)
-        status = srv.swarm_status({"repo": str(self.repo), "run_id": run_id})
-        self.assertIn("phase=awaiting_review", status)
+        self.assertEqual(seen, ["t1", "t1", "t2"])
+        self.assertIn("phase=awaiting_review", srv.swarm_status(r))
         review = srv.swarm_review({"repo": str(self.repo), "run_id": run_id})
         self.assertIn("greet.py", review)
         srv.swarm_send_back({"repo": str(self.repo), "run_id": run_id,
                              "tasks": [{"id": "fix-1", "title": "docstring", "description": "add docstring"}]})
+        for _ in range(5):
+            if "wake: task-review" not in srv.swarm_status({**r, "wait_ms": 20000}):
+                break
+            srv.swarm_verdict({**r, "task_id": "fix-1", "approve": True})
         srv.live[run_id][1].join(30)
         done = srv.swarm_finish({"repo": str(self.repo), "run_id": run_id, "report": "ok"})
         self.assertIn("branch=swarm/", done)
