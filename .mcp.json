@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "agentswarm": {
+      "command": "python3",
+      "args": ["-m", "agentswarm", "mcp"],
+      "env": { "DEEPSEEK_API_KEY": "${DEEPSEEK_API_KEY}" }
+    }
+  }
+}

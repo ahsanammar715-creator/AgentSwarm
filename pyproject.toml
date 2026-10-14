@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentswarm"
+version = "0.1.0"
+description = "Expensive foreman model plans and audits; a swarm of cheap agents does the grinding."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+design = ["playwright>=1.40"]
+
+[project.scripts]
+agentswarm = "agentswarm.cli:main"
+
+[tool.setuptools]
+packages = ["agentswarm"]

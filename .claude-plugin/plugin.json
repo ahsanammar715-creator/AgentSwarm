@@ -1,0 +1,7 @@
+{
+  "name": "agentswarm",
+  "version": "0.1.0",
+  "description": "Your main model is the foreman; a swarm of cheap agents does the grinding in an isolated git worktree.",
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills"
+}
