@@ -15,7 +15,7 @@ EXAMPLE_TOML = """# agentswarm.toml -- put in your repo root or ~/.agentswarm.to
 # Prices are USD per 1M tokens; set them to your provider's real prices so the cost line is honest.
 
 [foreman]            # the expensive model: plans, intervenes, audits, final pass
-model = "gpt-5.6-sol"
+model = "gpt-6.1"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 reasoning_effort = "high"
@@ -40,7 +40,7 @@ cached_input_price = 0.07
 output_price = 1.10
 
 # [vision]           # optional: critiques screenshots in --design mode (defaults to the foreman)
-# model = "gpt-5.6-sol"
+# model = "gpt-6.1"
 
 [swarm]
 workers = 4

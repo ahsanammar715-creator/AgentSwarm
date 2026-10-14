@@ -1,13 +1,13 @@
 # AgentSwarm
 
-An expensive model (GPT‑5.6 Sol by default) works as the **foreman**: it plans, supervises, audits and
+An expensive model (GPT‑6.1 by default) works as the **foreman**: it plans, supervises, audits and
 signs off, and it never touches the code. A team of **cheap agents** (DeepSeek by default, or any
 OpenAI-compatible model) does the grinding: reading files, editing, running tests, fixing.
 
 Your expensive tokens go to thinking and checking. The cheap tokens go to the grinding.
 
 ```
-            GPT-5.6 Sol (foreman)
+              GPT-6.1 (foreman)
    plan ──► intervene on failures ──► audit every changed file ──► final pass
      │                ▲                      │
      ▼                │ compressed summary   ▼ cleanup tasks
@@ -44,7 +44,7 @@ for design mode.
   `git push`, `reset --hard`, `sudo` and similar, and API keys are stripped from worker shells. This
   is a seatbelt, not a sandbox, so run untrusted goals in a container.
 
-## Quick start (standalone CLI, GPT-5.6 Sol as foreman)
+## Quick start (standalone CLI, GPT-6.1 as foreman)
 
 ```bash
 pip install -e .                 # or: pip install -e '.[design]' && playwright install chromium
@@ -68,7 +68,13 @@ agentswarm merge [run_id]        # merges swarm/<id> into your current branch, r
 agentswarm clean [run_id]        # drop the worktree, keep the branch
 ```
 
-## Daily driver inside Codex or Claude Code (the host model is the foreman)
+## Daily driver inside Astra, Codex or Claude Code (the host model is the foreman)
+
+The recommended setup is to draft plans in **Astra** with GPT‑6.1. Astra connects to the
+`agentswarm` MCP server and acts as the foreman, so the expensive model spends its tokens only on
+planning, review and sign-off, while the swarm burns cheap DeepSeek tokens. Astra registers the server
+like any other MCP host: `python3 -m agentswarm mcp`, with `DEEPSEEK_API_KEY` in its env. Load
+`skills/swarm/SKILL.md` as its instructions.
 
 In MCP mode **your host session's model is the foreman**. It plans, polls the compressed status,
 audits with `swarm_review`, sends cleanup rounds back with `swarm_send_back`, and closes with
@@ -100,7 +106,7 @@ Settings are read in this order, with later sources winning: `~/.agentswarm.toml
 `SWARM_NO_WORKTREE`). Run `agentswarm init` to get a commented template.
 
 Every role takes any OpenAI-compatible endpoint, such as OpenAI, DeepSeek, OpenRouter, Together, vLLM
-or Ollama. **Check the model IDs and set real prices.** The defaults (`gpt-5.6-sol`, `deepseek-chat`,
+or Ollama. **Check the model IDs and set real prices.** The defaults (`gpt-6.1`, `deepseek-chat`,
 and the per-million-token prices) are placeholders, and the cost line is only as accurate as the
 prices you put in.
 

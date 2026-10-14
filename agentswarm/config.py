@@ -32,7 +32,7 @@ class ModelConfig:
 
 def _default_foreman() -> ModelConfig:
     return ModelConfig(
-        model="gpt-5.6-sol",
+        model="gpt-6.1",
         base_url="https://api.openai.com/v1",
         api_key_env="OPENAI_API_KEY",
         input_price=5.0,
